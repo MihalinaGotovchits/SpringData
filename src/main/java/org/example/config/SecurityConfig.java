@@ -1,65 +1,105 @@
 package org.example.config;
 
-import lombok.AllArgsConstructor;
-import org.example.service.OurUserDetailsService;
+import lombok.RequiredArgsConstructor;
+import org.example.model.GitHubOAuth2User;
+import org.example.model.Role;
+import org.example.service.GitHubOAuth2UserService;
+import org.slf4j.LoggerFactory;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.security.authentication.AuthenticationManager;
-import org.springframework.security.authentication.AuthenticationProvider;
-import org.springframework.security.authentication.dao.DaoAuthenticationProvider;
-import org.springframework.security.config.annotation.authentication.configuration.AuthenticationConfiguration;
-import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
+import org.springframework.http.HttpEntity;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.HttpMethod;
+import org.springframework.http.HttpStatus;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.annotation.web.configuration.EnableWebSecurity;
-import org.springframework.security.config.annotation.web.configurers.AbstractHttpConfigurer;
-import org.springframework.security.config.http.SessionCreationPolicy;
-import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
-import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.security.config.annotation.web.configuration.WebSecurityCustomizer;
+import org.springframework.security.oauth2.client.registration.ClientRegistrationRepository;
 import org.springframework.security.web.SecurityFilterChain;
-import org.springframework.security.web.authentication.UsernamePasswordAuthenticationFilter;
+import org.springframework.security.web.authentication.AuthenticationSuccessHandler;
+import org.springframework.security.web.authentication.HttpStatusEntryPoint;
+import org.springframework.security.web.authentication.logout.LogoutHandler;
+import org.springframework.security.web.header.writers.StaticHeadersWriter;
+import org.springframework.web.client.RestTemplate;
 
 @Configuration
 @EnableWebSecurity
-@EnableMethodSecurity
-@AllArgsConstructor
+@RequiredArgsConstructor
 public class SecurityConfig {
-    private final OurUserDetailsService ourUserDetailsService;
-    private final JwtAuthenticationFilter jwtAuthenticationFilter;
-    private final LoggingFilter loggingFilter;
+
+    private final GitHubOAuth2UserService gitHubOAuth2UserService;
+    private final ClientRegistrationRepository clientRegistrationRepository;
+    private static final String GITHUB_CLIENT_ID = "Ov23liuqerxCioIi74DY";
 
     @Bean
-    public SecurityFilterChain securityFilterChain(HttpSecurity httpSecurity) throws Exception {
-        httpSecurity
-                .csrf(AbstractHttpConfigurer::disable)
-                .authorizeHttpRequests(request -> request
-                        .requestMatchers("/auth/**", "/public/**").permitAll()
-                        .requestMatchers("/admin/**").hasAnyAuthority("ROLE_SUPER_ADMIN")
-                        .requestMatchers("/moderator/**").hasAnyAuthority("ROLE_MODERATOR")
-                        .requestMatchers("/user/**").hasAnyAuthority("ROLE_USER")
-                        .anyRequest().authenticated())
-                .sessionManagement(manager -> manager.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-                .authenticationProvider(authenticationProvider())
-                .addFilterBefore(loggingFilter, UsernamePasswordAuthenticationFilter.class)
-                .addFilterBefore(jwtAuthenticationFilter, LoggingFilter.class);
+    public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+        http
+                .csrf(csrf -> csrf
+                        .ignoringRequestMatchers("/h2-console/**")
+                )
+                .headers(headers -> headers
+                        .frameOptions(frameOptions -> frameOptions
+                                .deny()
+                        )
+                        .addHeaderWriter(new StaticHeadersWriter("X-Frame-Options", "SAMEORIGIN", "/h2-console/**"))
+                )
+                .exceptionHandling(exception -> exception
+                        .authenticationEntryPoint(new HttpStatusEntryPoint(HttpStatus.UNAUTHORIZED))
+                )
+                .authorizeHttpRequests(auth -> auth
+                        .requestMatchers("/", "/login", "/error", "/webjars/**", "/css/**").permitAll()
+                        .requestMatchers("/h2-console/**").permitAll()
+                        .requestMatchers("/admin/**").hasRole("ADMIN")
+                        .anyRequest().authenticated()
+                )
+                .oauth2Login(oauth2 -> oauth2
+                        .loginPage("/")
+                        .userInfoEndpoint(userInfo -> userInfo
+                                .userService(gitHubOAuth2UserService)
+                        )
+                        .successHandler(authenticationSuccessHandler())
+                )
+                .logout(logout -> logout
+                        .logoutUrl("/logout")
+                        .addLogoutHandler(logoutHandler())
+                        .logoutSuccessUrl("/")
+                        .invalidateHttpSession(true)
+                        .deleteCookies("JSESSIONID")
+                );
 
-        return httpSecurity.build();
+        return http.build();
     }
 
     @Bean
-    public AuthenticationProvider authenticationProvider() {
-        DaoAuthenticationProvider daoAuthenticationProvider = new DaoAuthenticationProvider();
-        daoAuthenticationProvider.setUserDetailsService(ourUserDetailsService);
-        daoAuthenticationProvider.setPasswordEncoder(passwordEncoder());
-        return daoAuthenticationProvider;
+    public AuthenticationSuccessHandler authenticationSuccessHandler() {
+        return (request, response, authentication) -> {
+            GitHubOAuth2User user = (GitHubOAuth2User) authentication.getPrincipal();
+
+            if (user.getRole() == Role.ADMIN) {
+                response.sendRedirect("/admin");
+            } else {
+                response.sendRedirect("/user");
+            }
+
+            LoggerFactory.getLogger(getClass())
+                    .info("User {} logged in successfully with role {}", user.getEmail(), user.getRole());
+        };
     }
 
     @Bean
-    public PasswordEncoder passwordEncoder() {
-        return new BCryptPasswordEncoder();
+    public LogoutHandler logoutHandler() {
+        return (request, response, authentication) -> {
+            if (authentication != null) {
+                GitHubOAuth2User user = (GitHubOAuth2User) authentication.getPrincipal();
+
+                LoggerFactory.getLogger(getClass())
+                        .info("User {} logged out and token revoked", user.getEmail());
+            }
+        };
     }
 
     @Bean
-    public AuthenticationManager authenticationManager(AuthenticationConfiguration authenticationConfiguration) throws Exception {
-        return authenticationConfiguration.getAuthenticationManager();
+    public WebSecurityCustomizer webSecurityCustomizer() {
+        return web -> web.ignoring().requestMatchers("/h2-console/**");
     }
 }
